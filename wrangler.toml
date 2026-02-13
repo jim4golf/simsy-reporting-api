@@ -1,0 +1,25 @@
+name = "simsy-reporting-api"
+main = "src/index.ts"
+compatibility_date = "2024-11-01"
+compatibility_flags = ["nodejs_compat"]
+
+# Hyperdrive binding — connects to Hetzner PostgreSQL as the READER role
+# The API worker uses the restricted role that is subject to RLS
+[[hyperdrive]]
+binding = "HYPERDRIVE"
+id = "a8bcf6669dc847ab85963aaab0597076"
+# Create with: wrangler hyperdrive create simsy-reporting-db-api \
+#   --connection-string="postgres://simsy_reporting_app:PASSWORD@128.140.64.5:5432/simsy_reporting"
+
+# KV namespace for tenant mapping and rate limiting
+[[kv_namespaces]]
+binding = "TENANT_KV"
+id = "a740ce0a55f94fa8aaa655a7f3f09e15"
+# Create with: wrangler kv namespace create SIMSY_TENANT_KV
+
+# Environment variables
+[vars]
+API_VERSION = "v1"
+RATE_LIMIT_PER_MINUTE = "100"
+DEFAULT_PAGE_SIZE = "100"
+MAX_PAGE_SIZE = "1000"
