@@ -20,7 +20,7 @@
 
 import type { Env } from './types';
 import { authenticateTenant } from './auth';
-import { createDbClient, setTenantContext } from './db';
+import { createDbClient, withTenantContext } from './db';
 import { handleOptions, corsHeaders } from './middleware/cors';
 import { checkRateLimit } from './middleware/rate-limit';
 import { routeRequest } from './router';
@@ -62,8 +62,8 @@ export default {
           { method: 'POST', path: '/api/v1/export', description: 'Bulk data export (CSV/JSON)' },
         ],
         authentication: {
-          type: 'Cloudflare Access Service Token',
-          headers: ['CF-Access-Client-Id', 'CF-Access-Client-Secret'],
+          type: 'Service Token',
+          headers: ['CF-Access-Client-Id'],
         },
       });
     }
@@ -91,16 +91,16 @@ export default {
       );
     }
 
-    // Connect to database and set tenant context
+    // Connect to database and run query within a transaction with RLS context
     const sql = createDbClient(env);
 
     try {
-      // Begin a transaction-like scope with SET LOCAL
-      // SET LOCAL ensures the tenant setting only lasts for this connection use
-      await setTenantContext(sql, tenant);
+      // withTenantContext wraps everything in BEGIN...COMMIT so that
+      // SET LOCAL app.current_tenant takes effect for all queries
+      const response = await withTenantContext(sql, tenant, async (tx) => {
+        return await routeRequest(request, url, tx, tenant, env, rateLimit);
+      });
 
-      // Route the request
-      const response = await routeRequest(request, url, sql, tenant, env, rateLimit);
       return response;
 
     } catch (error) {

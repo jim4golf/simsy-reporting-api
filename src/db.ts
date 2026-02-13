@@ -16,21 +16,22 @@ export function createDbClient(env: Env) {
 }
 
 /**
- * Set the RLS context for the current request.
- * This must be called before any data queries.
- *
- * Sets app.current_tenant to the authenticated tenant_id.
- * For customer role, also sets app.current_customer.
- *
- * SET LOCAL ensures the setting only lasts for the current transaction.
+ * Execute a callback within a transaction with tenant RLS context.
+ * SET LOCAL only works inside BEGIN...COMMIT, so we must wrap
+ * all tenant-scoped queries in a transaction.
  */
-export async function setTenantContext(
+export async function withTenantContext<T>(
   sql: postgres.Sql,
-  tenant: TenantInfo
-): Promise<void> {
-  await sql.unsafe(`SET LOCAL app.current_tenant = '${tenant.tenant_id}'`);
+  tenant: TenantInfo,
+  callback: (sql: postgres.Sql) => Promise<T>
+): Promise<T> {
+  return await sql.begin(async (tx) => {
+    await tx.unsafe(`SET LOCAL app.current_tenant = '${tenant.tenant_id}'`);
 
-  if (tenant.role === 'customer' && tenant.customer_name) {
-    await sql.unsafe(`SET LOCAL app.current_customer = '${tenant.customer_name}'`);
-  }
+    if (tenant.role === 'customer' && tenant.customer_name) {
+      await tx.unsafe(`SET LOCAL app.current_customer = '${tenant.customer_name}'`);
+    }
+
+    return await callback(tx);
+  });
 }
