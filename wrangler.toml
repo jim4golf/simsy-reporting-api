@@ -23,3 +23,10 @@ API_VERSION = "v1"
 RATE_LIMIT_PER_MINUTE = "100"
 DEFAULT_PAGE_SIZE = "100"
 MAX_PAGE_SIZE = "1000"
+SESSION_TTL_HOURS = "24"
+OTP_TTL_MINUTES = "5"
+OTP_FROM_EMAIL = "noreply@s-imsy.com"
+
+# Secrets (set via CLI — not stored in this file):
+#   wrangler secret put JWT_SECRET
+#   wrangler secret put BREVO_API_KEY

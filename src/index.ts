@@ -2,20 +2,39 @@
  * S-IMSY Reporting API Worker
  *
  * Cloudflare Worker that serves the REST API for the reporting platform.
- * Authenticates tenants via Cloudflare Access service tokens,
+ * Authenticates users via JWT (browser) or Cloudflare Access service tokens (API),
  * enforces Row-Level Security per request, and returns JSON responses.
  *
  * Base path: /api/v1/
  *
- * Routes:
- *   GET  /api/v1/usage/summary           — Aggregated usage data
- *   GET  /api/v1/usage/records            — Paginated usage records
- *   GET  /api/v1/bundles                  — List active bundles
- *   GET  /api/v1/bundles/:id              — Bundle detail with instances
- *   GET  /api/v1/bundle-instances         — List bundle instances
- *   GET  /api/v1/endpoints                — List endpoints
- *   GET  /api/v1/endpoints/:id/usage      — Endpoint-specific usage
- *   POST /api/v1/export                   — Bulk data export (CSV/JSON)
+ * Public routes (no auth required):
+ *   POST /api/v1/auth/login            — Email + password → OTP
+ *   POST /api/v1/auth/verify-otp       — OTP → JWT
+ *   POST /api/v1/auth/forgot-password  — Send password reset OTP
+ *   POST /api/v1/auth/reset-password   — Verify OTP + set new password
+ *
+ * Protected routes:
+ *   GET  /api/v1/auth/me               — Current user profile
+ *   POST /api/v1/auth/logout           — Invalidate session
+ *   GET  /api/v1/usage/summary         — Aggregated usage data
+ *   GET  /api/v1/usage/records         — Paginated usage records
+ *   GET  /api/v1/bundles               — List active bundles
+ *   GET  /api/v1/bundles/:id           — Bundle detail with instances
+ *   GET  /api/v1/bundle-instances      — List bundle instances
+ *   GET  /api/v1/endpoints             — List endpoints
+ *   GET  /api/v1/endpoints/:id/usage   — Endpoint-specific usage
+ *   POST /api/v1/export                — Bulk data export (CSV/JSON)
+ *
+ * Admin routes (require admin role + JWT):
+ *   GET    /api/v1/admin/users                   — List users
+ *   POST   /api/v1/admin/users                   — Create user
+ *   GET    /api/v1/admin/users/:id               — User detail
+ *   PUT    /api/v1/admin/users/:id               — Update user
+ *   DELETE /api/v1/admin/users/:id               — Deactivate user
+ *   POST   /api/v1/admin/users/:id/reset-password — Reset password
+ *   GET    /api/v1/admin/sessions                — Active sessions
+ *   DELETE /api/v1/admin/sessions/:id            — Revoke session
+ *   GET    /api/v1/admin/tenants                 — List tenants
  */
 
 import type { Env } from './types';
@@ -23,8 +42,22 @@ import { authenticateTenant } from './auth';
 import { createDbClient, withTenantContext } from './db';
 import { handleOptions, corsHeaders } from './middleware/cors';
 import { checkRateLimit } from './middleware/rate-limit';
-import { routeRequest } from './router';
+import {
+  routeRequest,
+  handleLogin,
+  handleVerifyOTP,
+  handleForgotPassword,
+  handleResetPassword,
+} from './router';
 import { errorResponse, jsonResponse } from './utils/response';
+
+/** Auth paths that do NOT require authentication */
+const PUBLIC_AUTH_PATHS = new Set([
+  '/api/v1/auth/login',
+  '/api/v1/auth/verify-otp',
+  '/api/v1/auth/forgot-password',
+  '/api/v1/auth/reset-password',
+]);
 
 export default {
   async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
@@ -52,6 +85,8 @@ export default {
         version: env.API_VERSION,
         base_url: `${url.origin}/api/v1`,
         endpoints: [
+          { method: 'POST', path: '/api/v1/auth/login', description: 'Email + password login' },
+          { method: 'POST', path: '/api/v1/auth/verify-otp', description: 'Verify 2FA code' },
           { method: 'GET', path: '/api/v1/usage/summary', description: 'Aggregated usage data' },
           { method: 'GET', path: '/api/v1/usage/records', description: 'Paginated usage records' },
           { method: 'GET', path: '/api/v1/bundles', description: 'List active bundles' },
@@ -62,21 +97,40 @@ export default {
           { method: 'POST', path: '/api/v1/export', description: 'Bulk data export (CSV/JSON)' },
         ],
         authentication: {
-          type: 'Service Token',
-          headers: ['CF-Access-Client-Id'],
+          methods: [
+            { type: 'Bearer JWT', description: 'Login via /auth/login + /auth/verify-otp' },
+            { type: 'Service Token', headers: ['CF-Access-Client-Id'], description: 'Cloudflare Access service token' },
+          ],
         },
       });
     }
 
-    // All /api/v1/* routes require authentication
+    // All /api/v1/* routes
     if (!url.pathname.startsWith('/api/v1/')) {
       return errorResponse(404, 'Not Found', 'API routes are under /api/v1/');
     }
 
-    // Authenticate tenant
+    // ── Public auth routes (no authentication required) ─────────────
+
+    if (PUBLIC_AUTH_PATHS.has(url.pathname) && request.method === 'POST') {
+      const sql = createDbClient(env);
+      try {
+        return await routePublicAuth(request, url, sql, env);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        console.error(`[AUTH] Error processing ${url.pathname}: ${msg}`);
+        return errorResponse(500, 'Internal Server Error', msg);
+      } finally {
+        await sql.end();
+      }
+    }
+
+    // ── Authenticated routes ────────────────────────────────────────
+
+    // Authenticate tenant (JWT or service token)
     const tenant = await authenticateTenant(request, env);
     if (!tenant) {
-      return errorResponse(401, 'Unauthorized', 'Invalid or missing service token');
+      return errorResponse(401, 'Unauthorized', 'Invalid or missing authentication');
     }
 
     // Rate limiting
@@ -95,8 +149,8 @@ export default {
     const sql = createDbClient(env);
 
     try {
-      // withTenantContext wraps everything in BEGIN...COMMIT so that
-      // SET LOCAL app.current_tenant takes effect for all queries
+      // Admin routes run queries on auth tables (no RLS), but also need
+      // tenant context for data-scoped queries. We always set the context.
       const response = await withTenantContext(sql, tenant, async (tx) => {
         return await routeRequest(request, url, tx, tenant, env, rateLimit);
       });
@@ -119,3 +173,27 @@ export default {
     }
   },
 };
+
+/**
+ * Route public (unauthenticated) auth requests.
+ * These get a raw SQL connection with no RLS context.
+ */
+async function routePublicAuth(
+  request: Request,
+  url: URL,
+  sql: ReturnType<typeof createDbClient>,
+  env: Env,
+): Promise<Response> {
+  switch (url.pathname) {
+    case '/api/v1/auth/login':
+      return handleLogin(request, sql, env);
+    case '/api/v1/auth/verify-otp':
+      return handleVerifyOTP(request, sql, env);
+    case '/api/v1/auth/forgot-password':
+      return handleForgotPassword(request, sql, env);
+    case '/api/v1/auth/reset-password':
+      return handleResetPassword(request, sql, env);
+    default:
+      return errorResponse(404, 'Not Found');
+  }
+}
