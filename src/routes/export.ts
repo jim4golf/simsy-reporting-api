@@ -9,6 +9,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
+import { tenantFilter } from '../db';
 import { errorResponse } from '../utils/response';
 import { corsHeaders } from '../middleware/cors';
 import { rateLimitHeaders } from '../middleware/rate-limit';
@@ -50,8 +51,9 @@ export async function handleExport(
 
   // Build query based on report type
   let query: string;
-  const params: unknown[] = [tenant.tenant_id];
-  let paramIdx = 2;
+  const tf = tenantFilter(tenant);
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
 
   let customerFilter = '';
   if (tenant.role === 'customer' && tenant.customer_name) {
@@ -90,7 +92,7 @@ export async function handleExport(
           serving_operator_name, serving_country_name,
           buy_charge, buy_currency, sell_charge, sell_currency
         FROM rpt_usage
-        WHERE tenant_id = $1 ${customerFilter} ${dateFilter} ${extraFilter}
+        WHERE ${tf.clause} ${customerFilter} ${dateFilter} ${extraFilter}
         ORDER BY timestamp DESC
       `;
       break;
@@ -102,7 +104,7 @@ export async function handleExport(
           price, currency, allowance, allowance_moniker,
           status_name, effective_from, effective_to
         FROM rpt_bundles
-        WHERE tenant_id = $1 ${customerFilter}
+        WHERE ${tf.clause} ${customerFilter}
         ORDER BY bundle_name ASC
       `;
       break;
@@ -115,7 +117,7 @@ export async function handleExport(
           start_time, end_time, status_name, status_moniker,
           sequence, sequence_max, data_used_mb, data_allowance_mb
         FROM rpt_bundle_instances
-        WHERE tenant_id = $1 ${customerFilter} ${extraFilter}
+        WHERE ${tf.clause} ${customerFilter} ${extraFilter}
         ORDER BY start_time DESC
       `;
       break;
@@ -129,7 +131,7 @@ export async function handleExport(
           charge_rolling_24h, charge_rolling_7d, charge_rolling_28d, charge_rolling_1y,
           first_activity, latest_activity
         FROM rpt_endpoints
-        WHERE tenant_id = $1 ${customerFilter}
+        WHERE ${tf.clause} ${customerFilter}
         ORDER BY endpoint_name ASC
       `;
       break;

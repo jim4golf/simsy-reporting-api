@@ -32,6 +32,7 @@
  *   PUT    /api/v1/admin/users/:id               — Update user
  *   DELETE /api/v1/admin/users/:id               — Deactivate user
  *   POST   /api/v1/admin/users/:id/reset-password — Reset password
+ *   POST   /api/v1/admin/users/:id/resend-invite — Re-send invite email
  *   GET    /api/v1/admin/sessions                — Active sessions
  *   DELETE /api/v1/admin/sessions/:id            — Revoke session
  *   GET    /api/v1/admin/tenants                 — List tenants
@@ -48,6 +49,7 @@ import {
   handleVerifyOTP,
   handleForgotPassword,
   handleResetPassword,
+  handleAcceptInvite,
 } from './router';
 import { errorResponse, jsonResponse } from './utils/response';
 
@@ -57,6 +59,7 @@ const PUBLIC_AUTH_PATHS = new Set([
   '/api/v1/auth/verify-otp',
   '/api/v1/auth/forgot-password',
   '/api/v1/auth/reset-password',
+  '/api/v1/auth/accept-invite',
 ]);
 
 export default {
@@ -193,6 +196,8 @@ async function routePublicAuth(
       return handleForgotPassword(request, sql, env);
     case '/api/v1/auth/reset-password':
       return handleResetPassword(request, sql, env);
+    case '/api/v1/auth/accept-invite':
+      return handleAcceptInvite(request, sql, env);
     default:
       return errorResponse(404, 'Not Found');
   }

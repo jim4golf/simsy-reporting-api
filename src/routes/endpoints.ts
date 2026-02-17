@@ -8,6 +8,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
+import { tenantFilter } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { paginatedResponse, jsonResponse, errorResponse } from '../utils/response';
 
@@ -22,13 +23,25 @@ export async function handleEndpointsList(
   const offset = paginationOffset(pagination);
   const status = searchParams.get('status');
 
-  const filters: string[] = ['tenant_id = $1'];
-  const params: unknown[] = [tenant.tenant_id];
-  let paramIdx = 2;
+  const tf = tenantFilter(tenant);
+  const filters: string[] = [tf.clause];
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
+
+  // Admin scoping: allow explicit tenant_id filter
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
 
   if (tenant.role === 'customer' && tenant.customer_id) {
     filters.push(`customer_id = $${paramIdx}`);
     params.push(tenant.customer_id);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
     paramIdx++;
   }
 
@@ -72,13 +85,16 @@ export async function handleEndpointUsage(
   env: Env,
   rateLimit: RateLimitResult
 ): Promise<Response> {
-  // Verify endpoint belongs to tenant
-  const endpoints = await sql`
-    SELECT endpoint_name FROM rpt_endpoints
-    WHERE tenant_id = ${tenant.tenant_id}
-      AND (id::text = ${endpointId} OR source_id = ${endpointId})
-    LIMIT 1
-  `;
+  // Verify endpoint belongs to tenant (RLS handles scoping for admins)
+  const tfLookup = tenantFilter(tenant);
+  const lookupParams: unknown[] = [...tfLookup.params, endpointId, endpointId];
+  const endpoints = await sql.unsafe(
+    `SELECT endpoint_name FROM rpt_endpoints
+    WHERE ${tfLookup.clause}
+      AND (id::text = $${tfLookup.nextIdx} OR source_id = $${tfLookup.nextIdx + 1})
+    LIMIT 1`,
+    lookupParams
+  );
 
   if (endpoints.length === 0) {
     return errorResponse(404, 'Endpoint not found', undefined, rateLimit);
@@ -99,16 +115,28 @@ export async function handleEndpointUsage(
     ? 'usage_date'
     : `date_trunc('${dateFunc === 'month' ? 'month' : 'year'}', usage_date)::date`;
 
+  const tfUsage = tenantFilter(tenant);
   const filters: string[] = [
-    'tenant_id = $1',
-    'endpoint_name = $2',
+    tfUsage.clause,
+    `endpoint_name = $${tfUsage.nextIdx}`,
   ];
-  const params: unknown[] = [tenant.tenant_id, endpointName];
-  let paramIdx = 3;
+  const params: unknown[] = [...tfUsage.params, endpointName];
+  let paramIdx = tfUsage.nextIdx + 1;
+
+  // Admin scoping: allow explicit tenant_id filter
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
 
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
     paramIdx++;
   }
 

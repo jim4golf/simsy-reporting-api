@@ -15,6 +15,8 @@ export interface Env {
   OTP_TTL_MINUTES: string;
   /** Sender email address for OTP emails */
   OTP_FROM_EMAIL: string;
+  /** Frontend base URL for invite links */
+  FRONTEND_URL: string;
 }
 
 export interface TenantInfo {

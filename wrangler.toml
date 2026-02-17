@@ -26,6 +26,7 @@ MAX_PAGE_SIZE = "1000"
 SESSION_TTL_HOURS = "24"
 OTP_TTL_MINUTES = "5"
 OTP_FROM_EMAIL = "noreply@s-imsy.com"
+FRONTEND_URL = "https://simsy-reporting.pages.dev"
 
 # Secrets (set via CLI — not stored in this file):
 #   wrangler secret put JWT_SECRET

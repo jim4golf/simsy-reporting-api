@@ -8,6 +8,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
+import { tenantFilter } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { jsonResponse, paginatedResponse, errorResponse } from '../utils/response';
 
@@ -35,9 +36,10 @@ export async function handleUsageSummary(
   const { view, dateCol } = viewMap[groupBy];
 
   // Build date filter
+  const tf = tenantFilter(tenant);
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
   let dateFilter = '';
-  const params: unknown[] = [tenant.tenant_id];
-  let paramIdx = 2;
 
   if (from) {
     dateFilter += ` AND ${dateCol} >= $${paramIdx}::date`;
@@ -50,11 +52,23 @@ export async function handleUsageSummary(
     paramIdx++;
   }
 
+  // Admin scoping: allow explicit tenant_id + customer filters
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    dateFilter += ` AND tenant_id = $${paramIdx}`;
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
+
   // Customer scoping
   let customerFilter = '';
+  const customerParam = searchParams.get('customer');
   if (tenant.role === 'customer' && tenant.customer_name) {
     customerFilter = ` AND customer_name = $${paramIdx}`;
     params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (customerParam) {
+    customerFilter = ` AND customer_name = $${paramIdx}`;
+    params.push(customerParam);
     paramIdx++;
   }
 
@@ -67,7 +81,7 @@ export async function handleUsageSummary(
       COALESCE(SUM(total_sell), 0) AS total_sell,
       COALESCE(SUM(record_count), 0) AS total_records
     FROM ${view}
-    WHERE tenant_id = $1 ${dateFilter} ${customerFilter}
+    WHERE ${tf.clause} ${dateFilter} ${customerFilter}
   `;
 
   const summary = await sql.unsafe(summaryQuery, params);
@@ -82,7 +96,7 @@ export async function handleUsageSummary(
       COALESCE(SUM(total_sell), 0) AS sell_total,
       COALESCE(SUM(record_count), 0) AS records
     FROM ${view}
-    WHERE tenant_id = $1 ${dateFilter} ${customerFilter}
+    WHERE ${tf.clause} ${dateFilter} ${customerFilter}
     GROUP BY ${dateCol}
     ORDER BY ${dateCol} ASC
   `;
@@ -128,13 +142,25 @@ export async function handleUsageRecords(
   const to = searchParams.get('to');
 
   // Build filters
-  const filters: string[] = ['tenant_id = $1'];
-  const params: unknown[] = [tenant.tenant_id];
-  let paramIdx = 2;
+  const tf2 = tenantFilter(tenant);
+  const filters: string[] = [tf2.clause];
+  const params: unknown[] = [...tf2.params];
+  let paramIdx = tf2.nextIdx;
+
+  // Admin scoping: allow explicit tenant_id filter
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
 
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
     paramIdx++;
   }
 

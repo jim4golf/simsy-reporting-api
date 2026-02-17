@@ -230,13 +230,14 @@ export async function handleVerifyOTP(
   await sql`UPDATE auth_otp SET used_at = now() WHERE id = ${otp.id}`;
   await env.TENANT_KV.delete(`otp_pending:${otp_token}`);
 
-  // 6. Fetch full user + tenant info
+  // 6. Fetch user info from auth_users only (no RLS on auth tables).
+  //    We do NOT join rpt_tenants here because it has RLS enabled and
+  //    no tenant context is set during public auth routes. The tenant_name
+  //    is resolved later via /auth/me (which runs with RLS context).
   const users = await sql`
-    SELECT u.id, u.email, u.display_name, u.role, u.tenant_id, u.customer_name,
-           t.tenant_name
-    FROM auth_users u
-    JOIN rpt_tenants t ON t.tenant_id = u.tenant_id
-    WHERE u.id = ${pending.user_id}
+    SELECT id, email, display_name, role, tenant_id, customer_name
+    FROM auth_users
+    WHERE id = ${pending.user_id}
   `;
 
   if (users.length === 0) {
@@ -245,7 +246,7 @@ export async function handleVerifyOTP(
 
   const user = users[0];
 
-  // 7. Create JWT
+  // 7. Create JWT (tenant_name uses tenant_id; full name resolved via /auth/me)
   const ttlHours = parseInt(env.SESSION_TTL_HOURS || '24');
   const { token, jti, expiresAt } = await createJWT(
     {
@@ -253,7 +254,7 @@ export async function handleVerifyOTP(
       email: user.email,
       role: user.role,
       tenant_id: user.tenant_id,
-      tenant_name: user.tenant_name,
+      tenant_name: user.tenant_id,
       customer_name: user.customer_name || undefined,
     },
     env.JWT_SECRET,
@@ -290,7 +291,7 @@ export async function handleVerifyOTP(
       display_name: user.display_name,
       role: user.role,
       tenant_id: user.tenant_id,
-      tenant_name: user.tenant_name,
+      tenant_name: user.tenant_id,
       customer_name: user.customer_name || null,
     },
   });
@@ -539,5 +540,88 @@ export async function handleResetPassword(
   return jsonResponse({
     status: 'ok',
     message: 'Password has been reset. Please log in with your new password.',
+  });
+}
+
+/* ================================================================
+ * POST /auth/accept-invite
+ * ================================================================ */
+
+export async function handleAcceptInvite(
+  request: Request,
+  sql: postgres.Sql,
+  env: Env,
+): Promise<Response> {
+  let body: { token?: string; password?: string };
+  try {
+    body = await request.json();
+  } catch {
+    return errorResponse(400, 'Invalid JSON body');
+  }
+
+  const { token, password } = body;
+  if (!token || !password) {
+    return errorResponse(400, 'token and password are required');
+  }
+
+  if (password.length < 12) {
+    return errorResponse(400, 'Password must be at least 12 characters');
+  }
+
+  // 1. Look up invite from KV
+  const pending = (await env.TENANT_KV.get(`invite:${token}`, 'json')) as {
+    user_id: string;
+    email: string;
+  } | null;
+  if (!pending) {
+    return errorResponse(401, 'Invalid or expired invitation link');
+  }
+
+  // 2. Verify user exists and has no password set (genuinely invited)
+  const users = await sql`
+    SELECT id, email, display_name, is_active, password_hash
+    FROM auth_users
+    WHERE id = ${pending.user_id}
+  `;
+
+  if (users.length === 0) {
+    return errorResponse(404, 'User account not found');
+  }
+
+  const user = users[0];
+
+  if (user.password_hash) {
+    // Already activated — prevent reuse
+    await env.TENANT_KV.delete(`invite:${token}`);
+    return errorResponse(409, 'Account has already been activated. Please log in.');
+  }
+
+  // 3. Set password and activate account
+  const salt = generateSalt();
+  const passwordHash = await hashPassword(password, salt);
+
+  await sql`
+    UPDATE auth_users
+    SET password_hash = ${passwordHash},
+        salt = ${salt},
+        is_active = true,
+        password_changed_at = now(),
+        updated_at = now()
+    WHERE id = ${user.id}
+  `;
+
+  // 4. Clean up invite token
+  await env.TENANT_KV.delete(`invite:${token}`);
+
+  // Mark the OTP audit record as used
+  await sql`
+    UPDATE auth_otp
+    SET used_at = now()
+    WHERE user_id = ${user.id} AND purpose = 'invite' AND used_at IS NULL
+  `;
+
+  return jsonResponse({
+    status: 'ok',
+    message: 'Password set successfully. You can now log in.',
   });
 }

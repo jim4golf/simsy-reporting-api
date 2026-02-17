@@ -19,8 +19,9 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import { jsonResponse, paginatedResponse, errorResponse } from '../utils/response';
-import { generateSalt, hashPassword, hashTokenId } from '../utils/crypto';
+import { generateSalt, hashPassword } from '../utils/crypto';
 import { parsePagination, paginationOffset } from '../utils/pagination';
+import { sendInviteEmail } from '../utils/email';
 import type { RateLimitResult } from '../middleware/rate-limit';
 
 /* ================================================================
@@ -122,18 +123,17 @@ export async function handleCreateUser(
     return errorResponse(400, 'Invalid JSON body');
   }
 
-  const { email, password, display_name, role, tenant_id, customer_name } = body as {
+  const { email, display_name, role, tenant_id, customer_name } = body as {
     email?: string;
-    password?: string;
     display_name?: string;
     role?: string;
     tenant_id?: string;
     customer_name?: string;
   };
 
-  // Validate required fields
-  if (!email || !password || !display_name || !role || !tenant_id) {
-    return errorResponse(400, 'Missing required fields: email, password, display_name, role, tenant_id');
+  // Validate required fields (no password — user sets it via invite link)
+  if (!email || !display_name || !role || !tenant_id) {
+    return errorResponse(400, 'Missing required fields: email, display_name, role, tenant_id');
   }
 
   if (!['admin', 'tenant', 'customer'].includes(role)) {
@@ -142,10 +142,6 @@ export async function handleCreateUser(
 
   if (role === 'customer' && !customer_name) {
     return errorResponse(400, 'customer_name is required for customer role');
-  }
-
-  if ((password as string).length < 12) {
-    return errorResponse(400, 'Password must be at least 12 characters');
   }
 
   // Validate email format
@@ -167,20 +163,50 @@ export async function handleCreateUser(
     return errorResponse(409, 'An account with this email already exists');
   }
 
-  // Hash password
-  const salt = generateSalt();
-  const passwordHash = await hashPassword(password as string, salt);
-
-  // Create user
+  // Create user without password (pending invite)
   const result = await sql`
-    INSERT INTO auth_users (email, password_hash, salt, display_name, role, tenant_id, customer_name, created_by)
-    VALUES (${email}, ${passwordHash}, ${salt}, ${display_name}, ${role}, ${tenant_id},
+    INSERT INTO auth_users (email, password_hash, salt, display_name, role, tenant_id, customer_name, is_active, created_by)
+    VALUES (${email}, ${null}, ${null}, ${display_name}, ${role}, ${tenant_id},
             ${role === 'customer' ? customer_name! : null},
+            false,
             ${tenant.user_id || null})
     RETURNING id, email, display_name, role, tenant_id, customer_name, is_active, created_at
   `;
 
   const created = result[0];
+
+  // Generate invite token (48-hour expiry) and store in KV
+  const inviteToken = crypto.randomUUID();
+  await env.TENANT_KV.put(
+    `invite:${inviteToken}`,
+    JSON.stringify({ user_id: created.id, email: created.email }),
+    { expirationTtl: 48 * 60 * 60 }, // 48 hours
+  );
+
+  // Also store an OTP record for audit trail
+  await sql`
+    INSERT INTO auth_otp (user_id, code_hash, purpose, expires_at)
+    VALUES (${created.id}, ${inviteToken}, 'invite',
+            ${new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString()})
+  `;
+
+  // Send invite email
+  const frontendUrl = env.FRONTEND_URL || 'https://simsy-reporting.pages.dev';
+  const inviteUrl = `${frontendUrl}/index.html#set-password?token=${inviteToken}`;
+
+  let emailSent = false;
+  try {
+    await sendInviteEmail({
+      to: created.email,
+      name: created.display_name,
+      inviteUrl,
+      apiKey: env.BREVO_API_KEY,
+      fromEmail: env.OTP_FROM_EMAIL || 'noreply@s-imsy.com',
+    });
+    emailSent = true;
+  } catch (err) {
+    console.error('[ADMIN] Failed to send invite email:', err);
+  }
 
   return jsonResponse(
     {
@@ -192,6 +218,7 @@ export async function handleCreateUser(
       customer_name: created.customer_name || null,
       is_active: created.is_active,
       created_at: created.created_at,
+      invite_sent: emailSent,
     },
     201,
   );
@@ -314,7 +341,7 @@ export async function handleUpdateUser(
 }
 
 /* ================================================================
- * DELETE /admin/users/:id (soft delete — deactivate)
+ * DELETE /admin/users/:id — permanently delete user
  * ================================================================ */
 
 export async function handleDeleteUser(
@@ -325,20 +352,13 @@ export async function handleDeleteUser(
 ): Promise<Response> {
   // Prevent self-deletion
   if (tenant.user_id === userId) {
-    return errorResponse(400, 'Cannot deactivate your own account');
+    return errorResponse(400, 'Cannot delete your own account');
   }
 
-  const existing = await sql`SELECT id, is_active FROM auth_users WHERE id = ${userId}`;
+  const existing = await sql`SELECT id, email FROM auth_users WHERE id = ${userId}`;
   if (existing.length === 0) {
     return errorResponse(404, 'User not found');
   }
-
-  // Soft delete
-  await sql`
-    UPDATE auth_users
-    SET is_active = false, updated_at = now()
-    WHERE id = ${userId}
-  `;
 
   // Revoke all active sessions for this user
   const sessions = await sql`
@@ -349,7 +369,90 @@ export async function handleDeleteUser(
   }
   await sql`DELETE FROM auth_sessions WHERE user_id = ${userId}`;
 
-  return jsonResponse({ status: 'ok', message: 'User deactivated and sessions revoked' });
+  // Delete OTP records
+  await sql`DELETE FROM auth_otp WHERE user_id = ${userId}`;
+
+  // Delete the user record permanently
+  await sql`DELETE FROM auth_users WHERE id = ${userId}`;
+
+  return jsonResponse({ status: 'ok', message: 'User permanently deleted' });
+}
+
+/* ================================================================
+ * POST /admin/users/:id/resend-invite — send (or re-send) invite
+ * ================================================================ */
+
+export async function handleResendInvite(
+  userId: string,
+  sql: postgres.Sql,
+  env: Env,
+): Promise<Response> {
+  const users = await sql`
+    SELECT id, email, display_name, password_hash
+    FROM auth_users WHERE id = ${userId}
+  `;
+
+  if (users.length === 0) {
+    return errorResponse(404, 'User not found');
+  }
+
+  const user = users[0];
+
+  // If user already has a password set, they don't need an invite
+  if (user.password_hash) {
+    return errorResponse(400, 'User has already set their password. Use password reset instead.');
+  }
+
+  // Invalidate any previous invite tokens for this user
+  const oldInvites = await sql`
+    SELECT code_hash FROM auth_otp WHERE user_id = ${userId} AND purpose = 'invite' AND used_at IS NULL
+  `;
+  for (const inv of oldInvites) {
+    await env.TENANT_KV.delete(`invite:${inv.code_hash}`);
+  }
+  await sql`
+    UPDATE auth_otp SET used_at = now()
+    WHERE user_id = ${userId} AND purpose = 'invite' AND used_at IS NULL
+  `;
+
+  // Generate new invite token (48-hour expiry)
+  const inviteToken = crypto.randomUUID();
+  await env.TENANT_KV.put(
+    `invite:${inviteToken}`,
+    JSON.stringify({ user_id: user.id, email: user.email }),
+    { expirationTtl: 48 * 60 * 60 },
+  );
+
+  // Audit record
+  await sql`
+    INSERT INTO auth_otp (user_id, code_hash, purpose, expires_at)
+    VALUES (${user.id}, ${inviteToken}, 'invite',
+            ${new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString()})
+  `;
+
+  // Send invite email
+  const frontendUrl = env.FRONTEND_URL || 'https://simsy-reporting.pages.dev';
+  const inviteUrl = `${frontendUrl}/index.html#set-password?token=${inviteToken}`;
+
+  let emailSent = false;
+  try {
+    await sendInviteEmail({
+      to: user.email,
+      name: user.display_name,
+      inviteUrl,
+      apiKey: env.BREVO_API_KEY,
+      fromEmail: env.OTP_FROM_EMAIL || 'noreply@s-imsy.com',
+    });
+    emailSent = true;
+  } catch (err) {
+    console.error('[ADMIN] Failed to send invite email:', err);
+  }
+
+  return jsonResponse({
+    status: 'ok',
+    message: emailSent ? 'Invite email sent' : 'Failed to send invite email',
+    invite_sent: emailSent,
+  });
 }
 
 /* ================================================================

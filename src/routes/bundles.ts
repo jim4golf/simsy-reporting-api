@@ -8,6 +8,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
+import { tenantFilter } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { paginatedResponse, jsonResponse, errorResponse } from '../utils/response';
 
@@ -22,13 +23,16 @@ export async function handleBundlesList(
   const offset = paginationOffset(pagination);
   const status = searchParams.get('status');
 
-  const filters: string[] = ['tenant_id = $1'];
-  const params: unknown[] = [tenant.tenant_id];
-  let paramIdx = 2;
+  const tf = tenantFilter(tenant);
+  const filters: string[] = [tf.clause];
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
 
-  if (tenant.role === 'customer' && tenant.customer_name) {
-    // Customers don't see the bundle catalog directly — they see through instances
-    // But we can still filter if there's a customer_name on bundles
+  // Admin scoping: allow explicit tenant_id filter
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
   }
 
   if (status) {
@@ -70,18 +74,21 @@ export async function handleBundleDetail(
   rateLimit: RateLimitResult
 ): Promise<Response> {
   // Fetch the bundle
-  const bundles = await sql`
-    SELECT
+  const tfDetail = tenantFilter(tenant);
+  const bundleParams: unknown[] = [...tfDetail.params, bundleId, bundleId];
+  const bundles = await sql.unsafe(
+    `SELECT
       id, source_id AS bundle_id, bundle_name, bundle_moniker,
       price, currency, formatted_price,
       allowance, allowance_moniker,
       bundle_type_name, offer_type_name, status_name,
       effective_from, effective_to
     FROM rpt_bundles
-    WHERE tenant_id = ${tenant.tenant_id}
-      AND (id::text = ${bundleId} OR source_id = ${bundleId})
-    LIMIT 1
-  `;
+    WHERE ${tfDetail.clause}
+      AND (id::text = $${tfDetail.nextIdx} OR source_id = $${tfDetail.nextIdx + 1})
+    LIMIT 1`,
+    bundleParams
+  );
 
   if (bundles.length === 0) {
     return errorResponse(404, 'Bundle not found', undefined, rateLimit);
@@ -90,11 +97,13 @@ export async function handleBundleDetail(
   const bundle = bundles[0];
 
   // Fetch related instances
-  let instanceFilter = '';
-  const instanceParams: unknown[] = [tenant.tenant_id, bundle.bundle_moniker];
+  const tfInst = tenantFilter(tenant);
+  const instanceParams: unknown[] = [...tfInst.params, bundle.bundle_moniker];
+  let instParamIdx = tfInst.nextIdx + 1;
 
+  let instanceFilter = '';
   if (tenant.role === 'customer' && tenant.customer_name) {
-    instanceFilter = ' AND customer_name = $3';
+    instanceFilter = ` AND customer_name = $${instParamIdx}`;
     instanceParams.push(tenant.customer_name);
   }
 
@@ -106,8 +115,8 @@ export async function handleBundleDetail(
       sequence, sequence_max,
       data_used_mb, data_allowance_mb
     FROM rpt_bundle_instances
-    WHERE tenant_id = $1
-      AND bundle_moniker = $2
+    WHERE ${tfInst.clause}
+      AND bundle_moniker = $${tfInst.nextIdx}
       ${instanceFilter}
     ORDER BY start_time DESC
     LIMIT 50`,

@@ -2,11 +2,11 @@
  * Cryptographic utilities for authentication.
  *
  * Uses the Web Crypto API (available in Cloudflare Workers).
- * Password hashing uses PBKDF2-SHA256 with 600,000 iterations
- * per OWASP 2024 recommendations.
+ * Password hashing uses PBKDF2-SHA256 with 100,000 iterations
+ * (Cloudflare Workers Web Crypto API limit).
  */
 
-const PBKDF2_ITERATIONS = 600_000;
+const PBKDF2_ITERATIONS = 100_000;
 const SALT_BYTES = 16;
 const HASH_BYTES = 32; // 256 bits
 

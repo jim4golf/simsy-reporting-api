@@ -15,6 +15,14 @@ interface SendOTPOptions {
   fromEmail: string;
 }
 
+interface SendInviteOptions {
+  to: string;
+  name: string;
+  inviteUrl: string;
+  apiKey: string;
+  fromEmail: string;
+}
+
 /**
  * Send an OTP email via Brevo.
  * Throws on failure so the caller can decide how to handle it.
@@ -62,6 +70,105 @@ export async function sendOTPEmail(opts: SendOTPOptions): Promise<void> {
     console.error(`[EMAIL] Brevo API error (${response.status}): ${body}`);
     throw new Error(`Failed to send OTP email: ${response.status}`);
   }
+}
+
+/**
+ * Send an account invitation email via Brevo.
+ * Contains a link for the user to set their password.
+ */
+export async function sendInviteEmail(opts: SendInviteOptions): Promise<void> {
+  const { to, name, inviteUrl, apiKey, fromEmail } = opts;
+
+  const subject = 'You\'ve been invited to S-IMSY Reporting';
+  const html = buildInviteHTML(name, inviteUrl);
+  const text = `Hi ${name},\n\nYou've been invited to the S-IMSY Reporting Portal.\n\nClick the link below to set your password and activate your account:\n${inviteUrl}\n\nThis link expires in 48 hours.\n\n— S-IMSY Reporting Portal`;
+
+  const response = await fetch(BREVO_API_URL, {
+    method: 'POST',
+    headers: {
+      'api-key': apiKey,
+      'Content-Type': 'application/json',
+      'Accept': 'application/json',
+    },
+    body: JSON.stringify({
+      sender: {
+        name: 'S-IMSY Reporting',
+        email: fromEmail,
+      },
+      to: [{ email: to, name }],
+      subject,
+      htmlContent: html,
+      textContent: text,
+    }),
+  });
+
+  if (!response.ok) {
+    const body = await response.text().catch(() => 'unknown error');
+    console.error(`[EMAIL] Brevo invite error (${response.status}): ${body}`);
+    throw new Error(`Failed to send invite email: ${response.status}`);
+  }
+}
+
+function buildInviteHTML(name: string, inviteUrl: string): string {
+  return `<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1.0"></head>
+<body style="margin:0;padding:0;background:#0a0e1a;font-family:Arial,'Helvetica Neue',sans-serif;">
+  <table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="background:#0a0e1a;">
+    <tr><td align="center" style="padding:40px 20px;">
+      <table role="presentation" width="420" cellpadding="0" cellspacing="0" style="background:#1e293b;border-radius:16px;border:1px solid #334155;">
+        <tr><td style="padding:32px;">
+          <!-- Header -->
+          <table role="presentation" width="100%" cellpadding="0" cellspacing="0">
+            <tr>
+              <td style="padding-bottom:24px;">
+                <div style="display:inline-block;width:36px;height:36px;background:linear-gradient(135deg,#0ea5e9,#22d3ee);border-radius:10px;text-align:center;line-height:36px;font-size:18px;color:white;font-weight:bold;">S</div>
+                <span style="font-size:16px;font-weight:700;color:#f8fafc;vertical-align:middle;margin-left:8px;">S-IMSY Reporting</span>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Body -->
+          <p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 8px;">Hi ${name},</p>
+          <p style="color:#94a3b8;font-size:14px;line-height:1.6;margin:0 0 24px;">
+            You've been invited to the S-IMSY Reporting Portal. Click the button below to set your password and activate your account.
+          </p>
+
+          <!-- CTA Button -->
+          <table role="presentation" cellpadding="0" cellspacing="0" style="margin:0 auto 24px;">
+            <tr>
+              <td style="border-radius:10px;background:linear-gradient(135deg,#0ea5e9,#22d3ee);padding:0;">
+                <a href="${inviteUrl}" target="_blank" style="display:inline-block;padding:14px 32px;font-size:14px;font-weight:700;color:#ffffff;text-decoration:none;border-radius:10px;">
+                  Set Your Password
+                </a>
+              </td>
+            </tr>
+          </table>
+
+          <!-- Expiry note -->
+          <p style="color:#64748b;font-size:12px;line-height:1.5;margin:0 0 16px;text-align:center;">
+            This link expires in <strong style="color:#94a3b8;">48 hours</strong>.
+          </p>
+
+          <!-- Fallback link -->
+          <p style="color:#475569;font-size:11px;line-height:1.5;margin:0 0 16px;word-break:break-all;">
+            If the button doesn't work, copy and paste this URL into your browser:<br>
+            <a href="${inviteUrl}" style="color:#0ea5e9;text-decoration:none;">${inviteUrl}</a>
+          </p>
+
+          <!-- Divider -->
+          <hr style="border:none;border-top:1px solid #334155;margin:24px 0;">
+
+          <!-- Footer -->
+          <p style="color:#475569;font-size:11px;line-height:1.5;margin:0;">
+            If you weren't expecting this invitation, you can safely ignore this email.
+            This is an automated message from the S-IMSY Reporting Portal.
+          </p>
+        </td></tr>
+      </table>
+    </td></tr>
+  </table>
+</body>
+</html>`;
 }
 
 function buildEmailHTML(name: string, code: string, purposeText: string): string {

@@ -11,6 +11,7 @@ import { handleBundlesList, handleBundleDetail } from './routes/bundles';
 import { handleInstancesList } from './routes/instances';
 import { handleEndpointsList, handleEndpointUsage } from './routes/endpoints';
 import { handleExport } from './routes/export';
+import { handleFilterTenants, handleFilterCustomers } from './routes/filters';
 import { handleLogout, handleMe } from './routes/auth';
 import {
   handleListUsers,
@@ -19,6 +20,7 @@ import {
   handleUpdateUser,
   handleDeleteUser,
   handleAdminResetPassword,
+  handleResendInvite,
   handleListSessions,
   handleRevokeSession,
   handleListTenants,
@@ -62,6 +64,18 @@ export async function routeRequest(
     if (forbidden) return forbidden;
 
     return routeAdminRequest(request, url, sql, apiPath, tenant, env, rateLimit);
+  }
+
+  // ── Filter routes (populate dropdowns) ─────────────────────────
+
+  // GET /api/v1/filters/tenants
+  if (method === 'GET' && apiPath === '/filters/tenants') {
+    return handleFilterTenants(sql, tenant, rateLimit);
+  }
+
+  // GET /api/v1/filters/customers
+  if (method === 'GET' && apiPath === '/filters/customers') {
+    return handleFilterCustomers(searchParams, sql, tenant, rateLimit);
   }
 
   // ── Data routes (existing) ──────────────────────────────────────
@@ -154,6 +168,12 @@ async function routeAdminRequest(
     return handleAdminResetPassword(resetMatch[1], request, sql, env);
   }
 
+  // POST /admin/users/:id/resend-invite
+  const resendMatch = apiPath.match(/^\/admin\/users\/([^/]+)\/resend-invite$/);
+  if (method === 'POST' && resendMatch) {
+    return handleResendInvite(resendMatch[1], sql, env);
+  }
+
   // DELETE /admin/sessions/:id
   const sessionDeleteMatch = apiPath.match(/^\/admin\/sessions\/([^/]+)$/);
   if (method === 'DELETE' && sessionDeleteMatch) {
@@ -185,4 +205,4 @@ async function routeAdminRequest(
  * Route public auth requests (no authentication required).
  * Called from index.ts BEFORE the main auth check.
  */
-export { handleLogin, handleVerifyOTP, handleForgotPassword, handleResetPassword } from './routes/auth';
+export { handleLogin, handleVerifyOTP, handleForgotPassword, handleResetPassword, handleAcceptInvite } from './routes/auth';

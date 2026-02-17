@@ -7,6 +7,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
+import { tenantFilter } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { paginatedResponse } from '../utils/response';
 
@@ -24,13 +25,25 @@ export async function handleInstancesList(
   const status = searchParams.get('status');
   const expiringBefore = searchParams.get('expiring_before');
 
-  const filters: string[] = ['tenant_id = $1'];
-  const params: unknown[] = [tenant.tenant_id];
-  let paramIdx = 2;
+  const tf = tenantFilter(tenant);
+  const filters: string[] = [tf.clause];
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
+
+  // Admin scoping: allow explicit tenant_id filter
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
 
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
     paramIdx++;
   }
 
