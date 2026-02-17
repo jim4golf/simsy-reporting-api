@@ -199,6 +199,7 @@ export async function handleUsageRecords(
       timestamp, usage_date, service_type, charge_type,
       consumption, charged_consumption, uplink_bytes, downlink_bytes,
       bundle_name, bundle_moniker, status_moniker,
+      bundle_instance_id, sequence, sequence_max,
       serving_operator_name, serving_country_name,
       buy_charge, buy_currency, sell_charge, sell_currency
     FROM rpt_usage
