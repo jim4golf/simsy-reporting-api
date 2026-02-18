@@ -60,9 +60,15 @@ export async function handleInstancesList(
   }
 
   if (status) {
-    filters.push(`(LOWER(status_name) = LOWER($${paramIdx}) OR LOWER(status_moniker) = LOWER($${paramIdx}))`);
-    params.push(status);
-    paramIdx++;
+    const sl = status.toLowerCase();
+    if (sl === 'live') {
+      // Computed: currently within start and end window
+      filters.push(`(start_time <= NOW() AND end_time >= NOW() AND (data_allowance_mb IS NULL OR data_allowance_mb = 0 OR data_used_mb < data_allowance_mb))`);
+    } else {
+      filters.push(`(LOWER(status_name) = LOWER($${paramIdx}) OR LOWER(status_moniker) = LOWER($${paramIdx}))`);
+      params.push(status);
+      paramIdx++;
+    }
   }
 
   if (expiringBefore) {

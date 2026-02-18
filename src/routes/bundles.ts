@@ -36,9 +36,15 @@ export async function handleBundlesList(
   }
 
   if (status) {
-    filters.push(`LOWER(status_name) = LOWER($${paramIdx})`);
-    params.push(status);
-    paramIdx++;
+    const sl = status.toLowerCase();
+    if (sl === 'live') {
+      // Computed: currently within effective date range
+      filters.push(`(effective_from <= NOW() AND (effective_to IS NULL OR effective_to >= NOW()))`);
+    } else {
+      filters.push(`LOWER(status_name) = LOWER($${paramIdx})`);
+      params.push(status);
+      paramIdx++;
+    }
   }
 
   const whereClause = filters.join(' AND ');
