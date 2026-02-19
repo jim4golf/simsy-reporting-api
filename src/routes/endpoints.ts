@@ -40,7 +40,9 @@ export async function handleEndpointsList(
     params.push(tenant.customer_id);
     paramIdx++;
   } else if (searchParams.get('customer')) {
-    filters.push(`customer_name = $${paramIdx}`);
+    // rpt_endpoints has customer_id but not customer_name;
+    // resolve via rpt_bundle_instances which has both
+    filters.push(`endpoint_name IN (SELECT DISTINCT endpoint_name FROM rpt_bundle_instances WHERE customer_name = $${paramIdx} AND endpoint_name IS NOT NULL)`);
     params.push(searchParams.get('customer'));
     paramIdx++;
   }
@@ -69,7 +71,10 @@ export async function handleEndpointsList(
       first_activity, latest_activity
     FROM rpt_endpoints
     WHERE ${whereClause}
-    ORDER BY endpoint_name ASC NULLS LAST
+    ORDER BY
+      CASE WHEN COALESCE(usage_rolling_28d, 0) = 0 AND COALESCE(usage_rolling_1y, 0) = 0 THEN 1 ELSE 0 END,
+      CASE WHEN COALESCE(usage_rolling_28d, 0) = 0 AND COALESCE(usage_rolling_1y, 0) = 0 THEN LENGTH(COALESCE(endpoint_name, '')) END DESC,
+      endpoint_name ASC NULLS LAST
     LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`,
     dataParams
   );
