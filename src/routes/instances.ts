@@ -49,8 +49,8 @@ export async function handleInstancesList(
   }
 
   if (iccid) {
-    filters.push(`iccid = $${paramIdx}`);
-    params.push(iccid);
+    filters.push(`iccid ILIKE $${paramIdx}`);
+    params.push(`%${iccid}%`);
     paramIdx++;
   }
 

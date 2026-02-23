@@ -22,6 +22,7 @@ export async function handleEndpointsList(
   const pagination = parsePagination(searchParams, env);
   const offset = paginationOffset(pagination);
   const status = searchParams.get('status');
+  const search = searchParams.get('search');
 
   const tf = tenantFilter(tenant);
   const filters: string[] = [tf.clause];
@@ -50,6 +51,12 @@ export async function handleEndpointsList(
   if (status) {
     filters.push(`(LOWER(status) = LOWER($${paramIdx}) OR LOWER(endpoint_status_name) = LOWER($${paramIdx}))`);
     params.push(status);
+    paramIdx++;
+  }
+
+  if (search) {
+    filters.push(`(endpoint_name ILIKE $${paramIdx} OR source_id ILIKE $${paramIdx})`);
+    params.push(`%${search}%`);
     paramIdx++;
   }
 
