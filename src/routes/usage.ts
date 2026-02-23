@@ -91,6 +91,7 @@ export async function handleUsageSummary(
     SELECT
       ${dateCol}::text AS date,
       COALESCE(SUM(total_consumption), 0) AS consumption,
+      COALESCE(SUM(total_charged), 0) AS total_charged,
       COALESCE(SUM(total_bytes), 0) AS total_bytes,
       COALESCE(SUM(total_buy), 0) AS buy_total,
       COALESCE(SUM(total_sell), 0) AS sell_total,
@@ -120,10 +121,89 @@ export async function handleUsageSummary(
     data: data.map((row) => ({
       date: row.date,
       consumption: Number(row.consumption),
+      total_charged: Number(row.total_charged),
       total_bytes: Number(row.total_bytes),
       buy_total: Number(row.buy_total),
       sell_total: Number(row.sell_total),
       records: Number(row.records),
+    })),
+  }, 200, rateLimit);
+}
+
+/**
+ * GET /api/v1/usage/breakdown — Usage grouped by customer or endpoint
+ * Query params: group_by_field=customer|endpoint, from, to, limit
+ */
+export async function handleUsageBreakdown(
+  searchParams: URLSearchParams,
+  sql: postgres.Sql,
+  tenant: TenantInfo,
+  env: Env,
+  rateLimit: RateLimitResult
+): Promise<Response> {
+  const field = searchParams.get('group_by_field') || 'customer';
+  const from = searchParams.get('from');
+  const to = searchParams.get('to');
+  const limit = parseInt(searchParams.get('limit') || '20', 10);
+
+  if (!['customer', 'endpoint'].includes(field)) {
+    return errorResponse(400, 'Invalid group_by_field', 'Must be: customer or endpoint', rateLimit);
+  }
+
+  const groupCol = field === 'customer' ? 'customer_name' : 'endpoint_description';
+
+  const tf = tenantFilter(tenant);
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
+  let dateFilter = '';
+
+  if (from) {
+    dateFilter += ` AND usage_date >= $${paramIdx}::date`;
+    params.push(from);
+    paramIdx++;
+  }
+  if (to) {
+    dateFilter += ` AND usage_date <= $${paramIdx}::date`;
+    params.push(to);
+    paramIdx++;
+  }
+
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    dateFilter += ` AND tenant_id = $${paramIdx}`;
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
+
+  params.push(limit);
+
+  const query = `
+    SELECT
+      COALESCE(${groupCol}, 'Unknown') AS name,
+      COUNT(*) AS record_count,
+      COALESCE(SUM(charged_consumption), 0) AS total_charged,
+      COALESCE(SUM(uplink_bytes + downlink_bytes), 0) AS total_bytes,
+      COALESCE(SUM(buy_charge), 0) AS total_buy,
+      COALESCE(SUM(sell_charge), 0) AS total_sell
+    FROM rpt_usage
+    WHERE ${tf.clause} ${dateFilter}
+    GROUP BY ${groupCol}
+    ORDER BY total_charged DESC
+    LIMIT $${paramIdx}
+  `;
+
+  const data = await sql.unsafe(query, params);
+
+  return jsonResponse({
+    field,
+    from: from || 'all',
+    to: to || 'now',
+    data: data.map((row) => ({
+      name: row.name,
+      record_count: Number(row.record_count),
+      total_charged_gb: Number(row.total_charged) / (1024 * 1024 * 1024),
+      total_bytes_gb: Number(row.total_bytes) / (1024 * 1024 * 1024),
+      total_buy: Number(row.total_buy),
+      total_sell: Number(row.total_sell),
     })),
   }, 200, rateLimit);
 }

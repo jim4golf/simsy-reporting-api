@@ -24,6 +24,7 @@ export async function handleInstancesList(
   const bundleId = searchParams.get('bundle_id');
   const status = searchParams.get('status');
   const expiringBefore = searchParams.get('expiring_before');
+  const finalOnly = searchParams.get('final_only');
 
   const tf = tenantFilter(tenant);
   const filters: string[] = [tf.clause];
@@ -75,6 +76,10 @@ export async function handleInstancesList(
     filters.push(`end_time <= $${paramIdx}::timestamptz`);
     params.push(expiringBefore);
     paramIdx++;
+  }
+
+  if (finalOnly === 'true' || finalOnly === '1') {
+    filters.push(`sequence IS NOT NULL AND sequence_max IS NOT NULL AND sequence = sequence_max`);
   }
 
   const whereClause = filters.join(' AND ');
