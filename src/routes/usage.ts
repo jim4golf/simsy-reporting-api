@@ -76,6 +76,7 @@ export async function handleUsageSummary(
   const summaryQuery = `
     SELECT
       COALESCE(SUM(total_consumption), 0) AS total_consumption,
+      COALESCE(SUM(total_charged), 0) AS total_charged,
       COALESCE(SUM(total_bytes), 0) AS total_bytes,
       COALESCE(SUM(total_buy), 0) AS total_buy,
       COALESCE(SUM(total_sell), 0) AS total_sell,
@@ -113,6 +114,7 @@ export async function handleUsageSummary(
     },
     summary: {
       total_consumption: Number(summary[0]?.total_consumption || 0),
+      total_charged: Number(summary[0]?.total_charged || 0),
       total_bytes: Number(summary[0]?.total_bytes || 0),
       total_buy: Number(summary[0]?.total_buy || 0),
       total_sell: Number(summary[0]?.total_sell || 0),
@@ -290,4 +292,211 @@ export async function handleUsageRecords(
   );
 
   return paginatedResponse(data, total, pagination.page, pagination.pageSize, rateLimit);
+}
+
+/**
+ * GET /api/v1/usage/roaming — Server-side roaming aggregation
+ * Returns: top countries, top operators, home vs roaming split
+ * Query params: from, to, tenant_id, customer, limit (default 10)
+ */
+export async function handleUsageRoaming(
+  searchParams: URLSearchParams,
+  sql: postgres.Sql,
+  tenant: TenantInfo,
+  env: Env,
+  rateLimit: RateLimitResult
+): Promise<Response> {
+  const from = searchParams.get('from');
+  const to = searchParams.get('to');
+  const limit = parseInt(searchParams.get('limit') || '10', 10);
+
+  const tf = tenantFilter(tenant);
+  const filters: string[] = [tf.clause];
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
+
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
+
+  if (tenant.role === 'customer' && tenant.customer_name) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
+    paramIdx++;
+  }
+
+  if (from) {
+    filters.push(`usage_date >= $${paramIdx}::date`);
+    params.push(from);
+    paramIdx++;
+  }
+  if (to) {
+    filters.push(`usage_date <= $${paramIdx}::date`);
+    params.push(to);
+    paramIdx++;
+  }
+
+  const whereClause = filters.join(' AND ');
+
+  // Top countries by data volume (using charged_consumption — the billable figure)
+  const countryParams = [...params, limit];
+  const byCountry = await sql.unsafe(`
+    SELECT
+      COALESCE(serving_country_name, 'Unknown') AS country,
+      COALESCE(SUM(charged_consumption), 0) AS total_bytes,
+      COALESCE(SUM(buy_charge), 0) AS total_buy,
+      COUNT(*) AS record_count
+    FROM rpt_usage
+    WHERE ${whereClause}
+    GROUP BY serving_country_name
+    ORDER BY total_bytes DESC
+    LIMIT $${paramIdx}
+  `, countryParams);
+
+  // Top operators by data volume (using charged_consumption)
+  const operatorParams = [...params, limit];
+  const byOperator = await sql.unsafe(`
+    SELECT
+      COALESCE(serving_operator_name, 'Unknown') AS operator,
+      COALESCE(SUM(charged_consumption), 0) AS total_bytes,
+      COALESCE(SUM(buy_charge), 0) AS total_buy,
+      COUNT(*) AS record_count
+    FROM rpt_usage
+    WHERE ${whereClause}
+    GROUP BY serving_operator_name
+    ORDER BY total_bytes DESC
+    LIMIT $${paramIdx}
+  `, operatorParams);
+
+  // Total for home vs roaming calculation (using charged_consumption)
+  const totals = await sql.unsafe(`
+    SELECT
+      COALESCE(SUM(charged_consumption), 0) AS total_bytes,
+      COALESCE(SUM(buy_charge), 0) AS total_buy
+    FROM rpt_usage
+    WHERE ${whereClause}
+  `, params);
+
+  return jsonResponse({
+    countries: byCountry.map(r => ({
+      country: r.country,
+      total_bytes: Number(r.total_bytes),
+      total_buy: Number(r.total_buy),
+      record_count: Number(r.record_count),
+    })),
+    operators: byOperator.map(r => ({
+      operator: r.operator,
+      total_bytes: Number(r.total_bytes),
+      total_buy: Number(r.total_buy),
+      record_count: Number(r.record_count),
+    })),
+    totals: {
+      total_bytes: Number(totals[0]?.total_bytes || 0),
+      total_buy: Number(totals[0]?.total_buy || 0),
+    },
+  }, 200, rateLimit);
+}
+
+/**
+ * GET /api/v1/usage/costs — Monthly wholesale cost breakdown by tenant/customer
+ * Query params: from, to, tenant_id, customer, months (default 6)
+ */
+export async function handleUsageCosts(
+  searchParams: URLSearchParams,
+  sql: postgres.Sql,
+  tenant: TenantInfo,
+  env: Env,
+  rateLimit: RateLimitResult
+): Promise<Response> {
+  const months = parseInt(searchParams.get('months') || '6', 10);
+
+  const tf = tenantFilter(tenant);
+  const filters: string[] = [tf.clause];
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
+
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
+
+  if (tenant.role === 'customer' && tenant.customer_name) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
+    paramIdx++;
+  }
+
+  // Default date range: last N months
+  const from = searchParams.get('from');
+  const to = searchParams.get('to');
+  if (from) {
+    filters.push(`usage_date >= $${paramIdx}::date`);
+    params.push(from);
+    paramIdx++;
+  } else {
+    filters.push(`usage_date >= (date_trunc('month', NOW()) - ($${paramIdx} || ' months')::interval)::date`);
+    params.push(months.toString());
+    paramIdx++;
+  }
+  if (to) {
+    filters.push(`usage_date <= $${paramIdx}::date`);
+    params.push(to);
+    paramIdx++;
+  }
+
+  const whereClause = filters.join(' AND ');
+
+  // Monthly cost by customer (using charged_consumption — the billable figure)
+  const data = await sql.unsafe(`
+    SELECT
+      date_trunc('month', usage_date)::date::text AS month,
+      COALESCE(customer_name, 'Unknown') AS customer,
+      COALESCE(SUM(buy_charge), 0) AS wholesale_cost,
+      COALESCE(SUM(charged_consumption), 0) AS total_bytes,
+      COUNT(*) AS record_count
+    FROM rpt_usage
+    WHERE ${whereClause}
+    GROUP BY date_trunc('month', usage_date), customer_name
+    ORDER BY month DESC, wholesale_cost DESC
+  `, params);
+
+  // Monthly totals (using charged_consumption)
+  const monthlyTotals = await sql.unsafe(`
+    SELECT
+      date_trunc('month', usage_date)::date::text AS month,
+      COALESCE(SUM(buy_charge), 0) AS wholesale_cost,
+      COALESCE(SUM(charged_consumption), 0) AS total_bytes,
+      COUNT(*) AS record_count
+    FROM rpt_usage
+    WHERE ${whereClause}
+    GROUP BY date_trunc('month', usage_date)
+    ORDER BY month DESC
+  `, params);
+
+  return jsonResponse({
+    by_customer: data.map(r => ({
+      month: r.month,
+      customer: r.customer,
+      wholesale_cost: Number(r.wholesale_cost),
+      total_bytes: Number(r.total_bytes),
+      record_count: Number(r.record_count),
+    })),
+    monthly_totals: monthlyTotals.map(r => ({
+      month: r.month,
+      wholesale_cost: Number(r.wholesale_cost),
+      total_bytes: Number(r.total_bytes),
+      record_count: Number(r.record_count),
+    })),
+  }, 200, rateLimit);
 }

@@ -3,6 +3,7 @@
  *
  * GET /api/v1/endpoints                    — List all endpoints for tenant
  * GET /api/v1/endpoints/:id/usage          — Usage data for a specific endpoint
+ * GET /api/v1/endpoints/top                — Top endpoints by avg monthly usage with monthly breakdown
  */
 
 import type postgres from 'postgres';
@@ -55,7 +56,8 @@ export async function handleEndpointsList(
   }
 
   if (search) {
-    filters.push(`(endpoint_name ILIKE $${paramIdx} OR source_id ILIKE $${paramIdx})`);
+    // Search by endpoint name, source_id, OR ICCID (via bundle instances join)
+    filters.push(`(endpoint_name ILIKE $${paramIdx} OR source_id ILIKE $${paramIdx} OR endpoint_name IN (SELECT DISTINCT endpoint_name FROM rpt_bundle_instances WHERE iccid ILIKE $${paramIdx} AND endpoint_name IS NOT NULL))`);
     params.push(`%${search}%`);
     paramIdx++;
   }
@@ -194,4 +196,107 @@ export async function handleEndpointUsage(
       records: Number(row.records || 0),
     })),
   }, 200, rateLimit);
+}
+
+/**
+ * GET /api/v1/endpoints/top — Top endpoints ranked by average monthly usage.
+ * Returns each endpoint's monthly usage breakdown so the frontend can chart
+ * month-by-month usage lines.
+ *
+ * Query params: limit (default 5), tenant_id, customer
+ */
+export async function handleTopEndpoints(
+  searchParams: URLSearchParams,
+  sql: postgres.Sql,
+  tenant: TenantInfo,
+  env: Env,
+  rateLimit: RateLimitResult
+): Promise<Response> {
+  const limit = parseInt(searchParams.get('limit') || '5', 10);
+
+  const tf = tenantFilter(tenant);
+  const filters: string[] = [tf.clause];
+  const params: unknown[] = [...tf.params];
+  let paramIdx = tf.nextIdx;
+
+  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+    filters.push(`tenant_id = $${paramIdx}`);
+    params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
+
+  if (tenant.role === 'customer' && tenant.customer_name) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (searchParams.get('customer')) {
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(searchParams.get('customer'));
+    paramIdx++;
+  }
+
+  const whereClause = filters.join(' AND ');
+
+  // Step 1: Find top N endpoints by average monthly charged_consumption.
+  // Average = total usage / number of distinct active months.
+  const topParams = [...params, limit];
+  const topEndpoints = await sql.unsafe(`
+    SELECT
+      endpoint_name,
+      SUM(charged_consumption) AS total_bytes,
+      COUNT(DISTINCT date_trunc('month', usage_date)) AS active_months,
+      CASE WHEN COUNT(DISTINCT date_trunc('month', usage_date)) > 0
+           THEN SUM(charged_consumption) / COUNT(DISTINCT date_trunc('month', usage_date))
+           ELSE 0
+      END AS avg_monthly_bytes
+    FROM rpt_usage
+    WHERE ${whereClause}
+      AND endpoint_name IS NOT NULL
+      AND charged_consumption > 0
+    GROUP BY endpoint_name
+    ORDER BY avg_monthly_bytes DESC
+    LIMIT $${paramIdx}
+  `, topParams);
+
+  if (topEndpoints.length === 0) {
+    return jsonResponse({ endpoints: [] }, 200, rateLimit);
+  }
+
+  // Step 2: Get monthly breakdown for these endpoints
+  const endpointNames = topEndpoints.map((r: { endpoint_name: string }) => r.endpoint_name);
+  // Build IN clause with parameterised values
+  const inPlaceholders = endpointNames.map((_: string, i: number) => `$${paramIdx + i}`).join(',');
+  const monthlyParams = [...params, ...endpointNames];
+
+  const monthlyData = await sql.unsafe(`
+    SELECT
+      endpoint_name,
+      date_trunc('month', usage_date)::date::text AS month,
+      SUM(charged_consumption) AS total_bytes
+    FROM rpt_usage
+    WHERE ${whereClause}
+      AND endpoint_name IN (${inPlaceholders})
+      AND charged_consumption > 0
+    GROUP BY endpoint_name, date_trunc('month', usage_date)
+    ORDER BY date_trunc('month', usage_date) ASC
+  `, monthlyParams);
+
+  // Group monthly data by endpoint
+  const monthlyByEndpoint: Record<string, Record<string, number>> = {};
+  for (const row of monthlyData) {
+    const ep = row.endpoint_name as string;
+    if (!monthlyByEndpoint[ep]) monthlyByEndpoint[ep] = {};
+    monthlyByEndpoint[ep][row.month as string] = Number(row.total_bytes);
+  }
+
+  // Build response with endpoints ordered by avg monthly usage
+  const endpoints = topEndpoints.map((r: { endpoint_name: string; total_bytes: string; active_months: string; avg_monthly_bytes: string }) => ({
+    endpoint_name: r.endpoint_name,
+    total_bytes: Number(r.total_bytes),
+    active_months: Number(r.active_months),
+    avg_monthly_bytes: Number(r.avg_monthly_bytes),
+    monthly: monthlyByEndpoint[r.endpoint_name] || {},
+  }));
+
+  return jsonResponse({ endpoints }, 200, rateLimit);
 }

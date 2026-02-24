@@ -597,3 +597,4 @@ export async function handleListTenants(
 
   return jsonResponse({ data: rows });
 }
+

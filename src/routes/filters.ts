@@ -18,10 +18,11 @@ export async function handleFilterTenants(
   let tenants;
 
   if (tenant.role === 'admin') {
-    // Admin sees all tenants
+    // Admin sees all tenants — exclude Eclipse (it's a customer, not a tenant)
     tenants = await sql.unsafe(
       `SELECT tenant_id, tenant_name, parent_tenant_id
        FROM rpt_tenants
+       WHERE LOWER(tenant_name) != 'eclipse'
        ORDER BY parent_tenant_id NULLS FIRST, tenant_name ASC`
     );
   } else {

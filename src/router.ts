@@ -6,12 +6,13 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from './types';
 import type { RateLimitResult } from './middleware/rate-limit';
-import { handleUsageSummary, handleUsageRecords } from './routes/usage';
+import { handleUsageSummary, handleUsageRecords, handleUsageBreakdown, handleUsageRoaming, handleUsageCosts } from './routes/usage';
 import { handleBundlesList, handleBundleDetail } from './routes/bundles';
 import { handleInstancesList } from './routes/instances';
-import { handleEndpointsList, handleEndpointUsage } from './routes/endpoints';
+import { handleEndpointsList, handleEndpointUsage, handleTopEndpoints } from './routes/endpoints';
 import { handleExport } from './routes/export';
 import { handleFilterTenants, handleFilterCustomers } from './routes/filters';
+import { handleGetPricing, handleSavePricing, handleRevenueMonthly, handleRevenueCostChart } from './routes/pricing';
 import { handleLogout, handleMe } from './routes/auth';
 import {
   handleListUsers,
@@ -80,6 +81,16 @@ export async function routeRequest(
 
   // ── Data routes (existing) ──────────────────────────────────────
 
+  // GET /api/v1/revenue/monthly
+  if (method === 'GET' && apiPath === '/revenue/monthly') {
+    return handleRevenueMonthly(searchParams, sql, tenant, env, rateLimit);
+  }
+
+  // GET /api/v1/revenue/cost-chart
+  if (method === 'GET' && apiPath === '/revenue/cost-chart') {
+    return handleRevenueCostChart(searchParams, sql, tenant, env, rateLimit);
+  }
+
   // GET /api/v1/usage/summary
   if (method === 'GET' && apiPath === '/usage/summary') {
     return handleUsageSummary(searchParams, sql, tenant, env, rateLimit);
@@ -88,6 +99,21 @@ export async function routeRequest(
   // GET /api/v1/usage/records
   if (method === 'GET' && apiPath === '/usage/records') {
     return handleUsageRecords(searchParams, sql, tenant, env, rateLimit);
+  }
+
+  // GET /api/v1/usage/breakdown
+  if (method === 'GET' && apiPath === '/usage/breakdown') {
+    return handleUsageBreakdown(searchParams, sql, tenant, env, rateLimit);
+  }
+
+  // GET /api/v1/usage/roaming
+  if (method === 'GET' && apiPath === '/usage/roaming') {
+    return handleUsageRoaming(searchParams, sql, tenant, env, rateLimit);
+  }
+
+  // GET /api/v1/usage/costs
+  if (method === 'GET' && apiPath === '/usage/costs') {
+    return handleUsageCosts(searchParams, sql, tenant, env, rateLimit);
   }
 
   // GET /api/v1/bundles
@@ -109,6 +135,11 @@ export async function routeRequest(
   // GET /api/v1/endpoints
   if (method === 'GET' && apiPath === '/endpoints') {
     return handleEndpointsList(searchParams, sql, tenant, env, rateLimit);
+  }
+
+  // GET /api/v1/endpoints/top — must come before :id/usage wildcard
+  if (method === 'GET' && apiPath === '/endpoints/top') {
+    return handleTopEndpoints(searchParams, sql, tenant, env, rateLimit);
   }
 
   // GET /api/v1/endpoints/:id/usage
@@ -154,6 +185,18 @@ async function routeAdminRequest(
   if (method === 'GET' && apiPath === '/admin/tenants') {
     return handleListTenants(sql);
   }
+
+  // GET /admin/pricing
+  if (method === 'GET' && apiPath === '/admin/pricing') {
+    return handleGetPricing(sql, tenant, env, rateLimit);
+  }
+
+  // PUT /admin/pricing
+  if (method === 'PUT' && apiPath === '/admin/pricing') {
+    return handleSavePricing(request, env, rateLimit);
+  }
+
+
 
   // GET /admin/sessions
   if (method === 'GET' && apiPath === '/admin/sessions') {
