@@ -17,7 +17,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
-import { tenantFilter } from '../db';
+import { tenantFilter, isPlatformAdmin } from '../db';
 import { jsonResponse, errorResponse } from '../utils/response';
 
 interface PriceEntry {
@@ -132,17 +132,18 @@ export async function handleRevenueMonthly(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -251,17 +252,18 @@ export async function handleRevenueCostChart(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -317,24 +319,25 @@ export async function handleRevenueCostChart(
   const usageParams: unknown[] = [];
   let uIdx = 1;
 
-  // Tenant filter on rpt_usage
-  if (tenant.role !== 'admin') {
+  // Tenant filter on rpt_usage — mirror the same scoping logic
+  if (!isPlatformAdmin(tenant)) {
     usageFilters.push(`tenant_id IN (SELECT t.tenant_id FROM rpt_tenants t WHERE t.tenant_id = $${uIdx} OR t.parent_tenant_id = $${uIdx})`);
     usageParams.push(tenant.tenant_id);
     uIdx++;
   }
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     usageFilters.push(`tenant_id = $${uIdx}`);
     usageParams.push(searchParams.get('tenant_id'));
     uIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     usageFilters.push(`customer_name = $${uIdx}`);
     usageParams.push(tenant.customer_name);
     uIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     usageFilters.push(`customer_name = $${uIdx}`);
     usageParams.push(searchParams.get('customer'));
     uIdx++;

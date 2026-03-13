@@ -8,7 +8,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
-import { tenantFilter } from '../db';
+import { tenantFilter, isPlatformAdmin } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { jsonResponse, paginatedResponse, errorResponse } from '../utils/response';
 
@@ -52,8 +52,8 @@ export async function handleUsageSummary(
     paramIdx++;
   }
 
-  // Admin scoping: allow explicit tenant_id + customer filters
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  // Only platform admin can scope by arbitrary tenant_id
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     dateFilter += ` AND tenant_id = $${paramIdx}`;
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
@@ -61,14 +61,13 @@ export async function handleUsageSummary(
 
   // Customer scoping
   let customerFilter = '';
-  const customerParam = searchParams.get('customer');
   if (tenant.role === 'customer' && tenant.customer_name) {
     customerFilter = ` AND customer_name = $${paramIdx}`;
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (customerParam) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     customerFilter = ` AND customer_name = $${paramIdx}`;
-    params.push(customerParam);
+    params.push(searchParams.get('customer'));
     paramIdx++;
   }
 
@@ -170,9 +169,20 @@ export async function handleUsageBreakdown(
     paramIdx++;
   }
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     dateFilter += ` AND tenant_id = $${paramIdx}`;
     params.push(searchParams.get('tenant_id'));
+    paramIdx++;
+  }
+
+  // Customer scoping
+  if (tenant.role === 'customer' && tenant.customer_name) {
+    dateFilter += ` AND customer_name = $${paramIdx}`;
+    params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
+    dateFilter += ` AND customer_name = $${paramIdx}`;
+    params.push(searchParams.get('customer'));
     paramIdx++;
   }
 
@@ -229,18 +239,19 @@ export async function handleUsageRecords(
   const params: unknown[] = [...tf2.params];
   let paramIdx = tf2.nextIdx;
 
-  // Admin scoping: allow explicit tenant_id filter
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  // Only platform admin can scope by arbitrary tenant_id
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -315,17 +326,18 @@ export async function handleUsageRoaming(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -421,17 +433,18 @@ export async function handleUsageCosts(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;

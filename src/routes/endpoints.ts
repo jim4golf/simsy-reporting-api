@@ -4,12 +4,18 @@
  * GET /api/v1/endpoints                    — List all endpoints for tenant
  * GET /api/v1/endpoints/:id/usage          — Usage data for a specific endpoint
  * GET /api/v1/endpoints/top                — Top endpoints by avg monthly usage with monthly breakdown
+ *
+ * Security:
+ * - tenantFilter() enforces tenant scoping (only s-imsy admin sees all)
+ * - tenant_id query param only works for platform admin
+ * - customer query param is ignored for non-platform users; customer-role
+ *   users are always scoped to their own customer_name
  */
 
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
-import { tenantFilter } from '../db';
+import { tenantFilter, isPlatformAdmin } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { paginatedResponse, jsonResponse, errorResponse } from '../utils/response';
 
@@ -30,20 +36,25 @@ export async function handleEndpointsList(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  // Admin scoping: allow explicit tenant_id filter
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  // Only platform admin can scope by arbitrary tenant_id
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping: customer-role users ALWAYS see only their own data
   if (tenant.role === 'customer' && tenant.customer_id) {
     filters.push(`customer_id = $${paramIdx}`);
     params.push(tenant.customer_id);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
-    // rpt_endpoints has customer_id but not customer_name;
-    // resolve via rpt_bundle_instances which has both
+  } else if (tenant.role === 'customer' && tenant.customer_name) {
+    // Fallback: use customer_name via bundle instances lookup
+    filters.push(`endpoint_name IN (SELECT DISTINCT endpoint_name FROM rpt_bundle_instances WHERE customer_name = $${paramIdx} AND endpoint_name IS NOT NULL)`);
+    params.push(tenant.customer_name);
+    paramIdx++;
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
+    // Only platform admin can filter by arbitrary customer
     filters.push(`endpoint_name IN (SELECT DISTINCT endpoint_name FROM rpt_bundle_instances WHERE customer_name = $${paramIdx} AND endpoint_name IS NOT NULL)`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -56,7 +67,6 @@ export async function handleEndpointsList(
   }
 
   if (search) {
-    // Search by endpoint name, source_id, OR ICCID (via bundle instances join)
     filters.push(`(endpoint_name ILIKE $${paramIdx} OR source_id ILIKE $${paramIdx} OR endpoint_name IN (SELECT DISTINCT endpoint_name FROM rpt_bundle_instances WHERE iccid ILIKE $${paramIdx} AND endpoint_name IS NOT NULL))`);
     params.push(`%${search}%`);
     paramIdx++;
@@ -73,7 +83,7 @@ export async function handleEndpointsList(
   const dataParams = [...params, pagination.pageSize, offset];
   const data = await sql.unsafe(
     `SELECT
-      id, source_id AS endpoint_identifier, endpoint_name, endpoint_type, endpoint_type_name,
+      id, source_id AS endpoint_identifier, iccid, endpoint_name, endpoint_type, endpoint_type_name,
       status, endpoint_status_name, network_status_name,
       usage_rolling_24h, usage_rolling_7d, usage_rolling_28d, usage_rolling_1y,
       charge_rolling_24h, charge_rolling_7d, charge_rolling_28d, charge_rolling_1y,
@@ -99,11 +109,11 @@ export async function handleEndpointUsage(
   env: Env,
   rateLimit: RateLimitResult
 ): Promise<Response> {
-  // Verify endpoint belongs to tenant (RLS handles scoping for admins)
+  // Verify endpoint belongs to tenant
   const tfLookup = tenantFilter(tenant);
   const lookupParams: unknown[] = [...tfLookup.params, endpointId, endpointId];
   const endpoints = await sql.unsafe(
-    `SELECT endpoint_name FROM rpt_endpoints
+    `SELECT endpoint_name, iccid FROM rpt_endpoints
     WHERE ${tfLookup.clause}
       AND (id::text = $${tfLookup.nextIdx} OR source_id = $${tfLookup.nextIdx + 1})
     LIMIT 1`,
@@ -115,6 +125,7 @@ export async function handleEndpointUsage(
   }
 
   const endpointName = endpoints[0].endpoint_name;
+  const endpointIccid = endpoints[0].iccid;
   const groupBy = searchParams.get('group_by') || 'daily';
   const from = searchParams.get('from');
   const to = searchParams.get('to');
@@ -123,32 +134,34 @@ export async function handleEndpointUsage(
     return errorResponse(400, 'Invalid group_by parameter', undefined, rateLimit);
   }
 
-  // Query usage data grouped by the selected period
   const dateFunc = groupBy === 'daily' ? 'day' : groupBy === 'monthly' ? 'month' : 'year';
   const truncFunc = groupBy === 'daily'
     ? 'usage_date'
     : `date_trunc('${dateFunc === 'month' ? 'month' : 'year'}', usage_date)::date`;
 
   const tfUsage = tenantFilter(tenant);
-  const filters: string[] = [
-    tfUsage.clause,
-    `endpoint_name = $${tfUsage.nextIdx}`,
-  ];
-  const params: unknown[] = [...tfUsage.params, endpointName];
-  let paramIdx = tfUsage.nextIdx + 1;
+  const filters: string[] = [tfUsage.clause];
+  const params: unknown[] = [...tfUsage.params];
+  let paramIdx = tfUsage.nextIdx;
 
-  // Admin scoping: allow explicit tenant_id filter
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  // Match by ICCID — every usage row has one, and it's indexed
+  filters.push(`iccid = $${paramIdx}`);
+  params.push(endpointIccid);
+  paramIdx++;
+
+  // Only platform admin can scope by arbitrary tenant_id
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -185,6 +198,7 @@ export async function handleEndpointUsage(
 
   return jsonResponse({
     endpoint: endpointName,
+    iccid: endpointIccid,
     endpoint_id: endpointId,
     period: { from: from || 'all', to: to || 'now', group_by: groupBy },
     data: data.map((row) => ({
@@ -200,10 +214,6 @@ export async function handleEndpointUsage(
 
 /**
  * GET /api/v1/endpoints/top — Top endpoints ranked by average monthly usage.
- * Returns each endpoint's monthly usage breakdown so the frontend can chart
- * month-by-month usage lines.
- *
- * Query params: limit (default 5), tenant_id, customer
  */
 export async function handleTopEndpoints(
   searchParams: URLSearchParams,
@@ -219,17 +229,19 @@ export async function handleTopEndpoints(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  // Only platform admin can scope by arbitrary tenant_id
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer scoping
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
@@ -237,8 +249,6 @@ export async function handleTopEndpoints(
 
   const whereClause = filters.join(' AND ');
 
-  // Step 1: Find top N endpoints by average monthly charged_consumption.
-  // Average = total usage / number of distinct active months.
   const topParams = [...params, limit];
   const topEndpoints = await sql.unsafe(`
     SELECT
@@ -262,9 +272,7 @@ export async function handleTopEndpoints(
     return jsonResponse({ endpoints: [] }, 200, rateLimit);
   }
 
-  // Step 2: Get monthly breakdown for these endpoints
   const endpointNames = topEndpoints.map((r: { endpoint_name: string }) => r.endpoint_name);
-  // Build IN clause with parameterised values
   const inPlaceholders = endpointNames.map((_: string, i: number) => `$${paramIdx + i}`).join(',');
   const monthlyParams = [...params, ...endpointNames];
 
@@ -281,7 +289,6 @@ export async function handleTopEndpoints(
     ORDER BY date_trunc('month', usage_date) ASC
   `, monthlyParams);
 
-  // Group monthly data by endpoint
   const monthlyByEndpoint: Record<string, Record<string, number>> = {};
   for (const row of monthlyData) {
     const ep = row.endpoint_name as string;
@@ -289,7 +296,6 @@ export async function handleTopEndpoints(
     monthlyByEndpoint[ep][row.month as string] = Number(row.total_bytes);
   }
 
-  // Build response with endpoints ordered by avg monthly usage
   const endpoints = topEndpoints.map((r: { endpoint_name: string; total_bytes: string; active_months: string; avg_monthly_bytes: string }) => ({
     endpoint_name: r.endpoint_name,
     total_bytes: Number(r.total_bytes),

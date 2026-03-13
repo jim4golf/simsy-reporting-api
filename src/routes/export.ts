@@ -9,7 +9,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
-import { tenantFilter } from '../db';
+import { tenantFilter, isPlatformAdmin } from '../db';
 import { errorResponse } from '../utils/response';
 import { corsHeaders } from '../middleware/cors';
 import { rateLimitHeaders } from '../middleware/rate-limit';

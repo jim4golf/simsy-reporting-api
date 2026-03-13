@@ -1,13 +1,19 @@
 /**
- * Filter endpoints — populate tenant/customer dropdowns for admin users.
+ * Filter endpoints — populate tenant/customer dropdowns.
  *
- * GET /api/v1/filters/tenants     — Tenant hierarchy (admin sees all, tenant sees own + children)
- * GET /api/v1/filters/customers   — Distinct customer names, optionally scoped by tenant_id
+ * Security:
+ * - S-IMSY platform admin: sees all tenants (except Eclipse) and all customers
+ * - Sub-tenant: sees own tenant + children; customers scoped to those tenants
+ * - Customer: sees only their own tenant; customers scoped to their tenant
+ *
+ * GET /api/v1/filters/tenants     — Tenant hierarchy
+ * GET /api/v1/filters/customers   — Distinct customer names
  */
 
 import type postgres from 'postgres';
 import type { TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
+import { isPlatformAdmin } from '../db';
 import { jsonResponse } from '../utils/response';
 
 export async function handleFilterTenants(
@@ -17,8 +23,8 @@ export async function handleFilterTenants(
 ): Promise<Response> {
   let tenants;
 
-  if (tenant.role === 'admin') {
-    // Admin sees all tenants — exclude Eclipse (it's a customer, not a tenant)
+  if (isPlatformAdmin(tenant)) {
+    // Platform admin sees all tenants — exclude Eclipse (it's a customer, not a tenant)
     tenants = await sql.unsafe(
       `SELECT tenant_id, tenant_name, parent_tenant_id
        FROM rpt_tenants
@@ -26,7 +32,7 @@ export async function handleFilterTenants(
        ORDER BY parent_tenant_id NULLS FIRST, tenant_name ASC`
     );
   } else {
-    // Tenant sees own + children
+    // Everyone else sees own + children only
     tenants = await sql.unsafe(
       `SELECT tenant_id, tenant_name, parent_tenant_id
        FROM rpt_tenants
@@ -51,25 +57,40 @@ export async function handleFilterCustomers(
   const params: unknown[] = [];
   let paramIdx = 1;
 
-  if (tenant.role === 'admin') {
-    // Admin can scope by tenant_id if provided
+  if (isPlatformAdmin(tenant)) {
+    // Platform admin can optionally scope by tenant_id
     if (tenantId) {
       filters.push(`tenant_id = $${paramIdx}`);
       params.push(tenantId);
       paramIdx++;
     }
-  } else {
-    // Non-admin: scoped to own tenant + children
+  } else if (tenant.role === 'customer' && tenant.customer_name) {
+    // Customer: only see their own customer name within their tenant
     filters.push(
       `tenant_id IN (SELECT t.tenant_id FROM rpt_tenants t WHERE t.tenant_id = $${paramIdx} OR t.parent_tenant_id = $${paramIdx})`
     );
     params.push(tenant.tenant_id);
     paramIdx++;
+    filters.push(`customer_name = $${paramIdx}`);
+    params.push(tenant.customer_name);
+    paramIdx++;
+  } else {
+    // Sub-tenant: scoped to own tenant + children
+    filters.push(
+      `tenant_id IN (SELECT t.tenant_id FROM rpt_tenants t WHERE t.tenant_id = $${paramIdx} OR t.parent_tenant_id = $${paramIdx})`
+    );
+    params.push(tenant.tenant_id);
+    paramIdx++;
+    // Sub-tenant can optionally filter by tenant_id within their scope
+    if (tenantId) {
+      filters.push(`tenant_id = $${paramIdx}`);
+      params.push(tenantId);
+      paramIdx++;
+    }
   }
 
   const whereClause = filters.join(' AND ');
 
-  // Pull distinct customers from bundle instances (most complete source)
   const customers = await sql.unsafe(
     `SELECT DISTINCT customer_name
      FROM rpt_bundle_instances

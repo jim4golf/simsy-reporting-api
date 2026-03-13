@@ -16,7 +16,7 @@
 import type postgres from 'postgres';
 import type { Env, TenantInfo } from '../types';
 import type { RateLimitResult } from '../middleware/rate-limit';
-import { tenantFilter } from '../db';
+import { tenantFilter, isPlatformAdmin } from '../db';
 import { parsePagination, paginationOffset } from '../utils/pagination';
 import { paginatedResponse } from '../utils/response';
 
@@ -40,18 +40,20 @@ export async function handleInstancesList(
   const params: unknown[] = [...tf.params];
   let paramIdx = tf.nextIdx;
 
-  // Admin scoping: allow explicit tenant_id filter
-  if (tenant.role === 'admin' && searchParams.get('tenant_id')) {
+  // Only platform admin can scope by arbitrary tenant_id
+  if (isPlatformAdmin(tenant) && searchParams.get('tenant_id')) {
     filters.push(`tenant_id = $${paramIdx}`);
     params.push(searchParams.get('tenant_id'));
     paramIdx++;
   }
 
+  // Customer-role users: always scoped to their own customer_name
   if (tenant.role === 'customer' && tenant.customer_name) {
     filters.push(`customer_name = $${paramIdx}`);
     params.push(tenant.customer_name);
     paramIdx++;
-  } else if (searchParams.get('customer')) {
+  } else if (isPlatformAdmin(tenant) && searchParams.get('customer')) {
+    // Only platform admin can filter by arbitrary customer
     filters.push(`customer_name = $${paramIdx}`);
     params.push(searchParams.get('customer'));
     paramIdx++;
